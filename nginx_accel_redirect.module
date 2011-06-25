@@ -17,12 +17,12 @@ define('NGINX_ACCEL_REDIRECT_NGINX_TRANSFER', 1);
 /**
  * Implementation of hook_help().
  */
-function nginx_accel_redirect_help ($path, $arg) {
+function nginx_accel_redirect_help($path, $arg) {
   switch ($path) {
     case 'admin/help#nginx_accel_redirect':
       $output = t('<p>The Nginx Accel Redirect Module implements the ' .
                   l('XSendfile', 'http://wiki.nginx.org/XSendfile', array('attributes' => array('rel' => 'external'))) . ' facility in Nginx with Drupal.') . '</p>';
-      $output .= '<p>' . t('You have to specify a private path at the ' . l(t('file settings page'), 'admin/settings/file-system') . ' and then enable the X-Accel-Redirect transfer at the module ' . l(t('settings page'), 'admin/settings/file-system/nginx-accel-redirect')) . '.</p>';
+      $output .= '<p>' . t('You have to specify a private path at the' . ' ' . l(t('file settings page'), 'admin/settings/file-system') . ' and then enable the X-Accel-Redirect transfer at the module ' . l(t('settings page'), 'admin/settings/file-system/nginx-accel-redirect')) . '.</p>';
       return $output;
       break;
     case 'admin/settings/file-system':
@@ -36,7 +36,7 @@ function nginx_accel_redirect_help ($path, $arg) {
      $output = '';
       if (module_exists('help')) {
         $output = '<p>' . t('To use Nginx X-Accel-Redirect for fast private file transfer enable it below.') . '</p>';
-        $output .= '<p>' . t('More help at ') . l(t('this page'), 'admin/help#nginx_accel_redirect') . '.</p>';
+        $output .= '<p>' . t('More help at') . ' ' . l(t('this page'), 'admin/help#nginx_accel_redirect') . '.</p>';
       }
       return $output;  
       break;
@@ -49,7 +49,11 @@ function nginx_accel_redirect_help ($path, $arg) {
  * Overriding the default system/files menu handler.
  */
 function nginx_accel_redirect_menu_alter(&$items) {
-  $items['system/files']['page callback'] = 'nginx_accel_redirect_file_transfer';
+  $items['system/files'] = array(
+    'page callback' => 'nginx_accel_redirect_file_transfer',
+    'page arguments' => array('private'),
+    'access callback' => TRUE,
+  );
 } // nginx_accel_redirect_menu_alter
 
 
@@ -59,12 +63,13 @@ function nginx_accel_redirect_menu_alter(&$items) {
 function nginx_accel_redirect_menu() {
   $items = array();
 
-  $items['admin/settings/file-system/nginx-accel-redirect'] = array(
+  $items['admin/config/media/file-system/nginx-accel-redirect'] = array(
     'title' => 'X-Accel-Redirect File Settings',
     'description' => 'Control how files are transferred when using private files.',
     'page callback' => 'drupal_get_form',
     'page arguments' => array('nginx_accel_redirect_admin_settings'),
     'access arguments' => array('administer site configuration'),
+    'weight' => -11,
   );
   return $items;
 } // nginx_accel_redirect_menu
@@ -78,37 +83,44 @@ function nginx_accel_redirect_menu() {
 function nginx_accel_redirect_file_transfer() {
 
   $args = func_get_args();
-  
+  $scheme = array_shift($args);
+  $target = implode('/', $args);
+  $uri = $scheme . '://' . $target;
+  // Revert to default file_download if set to use PHP for transfer
   if (!variable_get('nginx_accel_redirect_transfer',
                     NGINX_ACCEL_REDIRECT_PHP_TRANSFER)) {
+    array_unshift($args, 'private'); // add the page argument back on - stream wrapper scheme
     call_user_func_array('file_download', $args);
     exit();
   }
-
-  // Merge the remaining arguments from GET['q'], into relative file path.
-  $filepath = implode('/', $args);
-
-  if (file_exists(file_create_path($filepath))) {
-    $headers = module_invoke_all('file_download', $filepath);
-    if (in_array(-1, $headers)) {
-      return drupal_access_denied();
+  if (file_stream_wrapper_valid_scheme($scheme) && file_exists($uri)) {
+    // Let other modules provide headers and controls access to the file.
+    // module_invoke_all() uses array_merge_recursive() which merges header
+    // values into a new array. To avoid that and allow modules to override
+    // headers instead, use array_merge() to merge the returned arrays.
+    $headers = array();
+    foreach (module_implements('file_download') as $module) {
+      $function = $module . '_file_download';
+      $result = $function($uri);
+      if ($result == -1) {
+        return drupal_access_denied();
+      }
+      if (isset($result) && is_array($result)) {
+        $headers = array_merge($headers, $result);
+      }
     }
     if (count($headers)) {
-      foreach ($headers as $header) {
-        // To prevent HTTP header injection, we delete new lines that are
-        // not followed by a space or a tab.
-        // See http://www.w3.org/Protocols/rfc2616/rfc2616-sec4.html#sec4.2
-        $header = preg_replace('/\r?\n(?!\t| )/', '', $header);
-        drupal_set_header($header);
+      foreach ($headers as $name => $value) {
+        drupal_add_http_header($name, $value);
       }
+      drupal_send_headers();
       // Setting the X-Accel-Redirect header for Nginx.
-      header('X-Accel-Redirect: ' . base_path() . file_create_path($filepath));        
+      header('X-Accel-Redirect: ' . base_path() . variable_get('file_private_path', ''). '/' . file_uri_target($uri));
       exit();
     }
   }
   return drupal_not_found();
 } // nginx_accel_redirect_file_transfer
-
 
 /**
  * The module settings form.
